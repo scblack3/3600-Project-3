@@ -89,7 +89,28 @@ class GBNHost():
                                                     #       ACK number of 0. If a problem occurs with the first
                                                     #       packet that is received, then this default ACK should 
                                                     #       be sent in response, as no real packet has been rcvd yet
-   
+
+    def create_data_pkt(self, seq_num, payload):
+        pkt = pack('!iiH?i%is' % len(payload), seq_num, self.last_ACKed, 0x0000, False, len(payload), payload.encode())
+        checksum = self.compute_checksum(pkt)
+        pkt = pack('!iiH?i%is' % len(payload), seq_num, self.last_ACKed, checksum, False, len(payload), payload.encode())
+        return pkt
+
+    def compute_checksum(self, packet):
+        carry = 0
+        # Packet is even do not pad
+        if len(packet) % 2 == 0:
+            pkt = packet
+        # Packet is odd
+        else:
+            pkt = packet + bytes(1)
+    
+        for i in range(0, len(pkt), 2):
+            word = pkt[i] << 8 | pkt[i + 1]
+            carry = carry + word
+            res = (carry & 0xffff) + (carry >> 16)
+            checksum = ~res & 0xffff
+        return checksum
 
     ###########################################################################################################
     ## Core Interface functions that are called by Simulator
@@ -102,8 +123,29 @@ class GBNHost():
     #       when slots open up in the sending window.
     # TODO: Implement this method
     def receive_from_application_layer(self, payload):
-        pass
+        # expectedseqnum = expected_seq_number
+        # nextseqnum = current_seq_number
+        # base = last_ACKed
+        # sequence number = current sequence number
+        # ack numbe = expected sequence number
+        # compute checkksum -> repack packet -> send to layer3
 
+        # checks for open window spots
+        if self.current_seq_number < (self.last_ACKed + self.window_size):
+            # Creates a packet and sends it to layer_3
+            pkt = self.create_data_pkt(self.current_seq_number, payload)
+
+            # Update the unACKed_buffer and send it to layer3
+            self.unACKed_buffer[self.current_seq_number] = pkt
+            self.simulator.to_layer3(self.entity, pkt, False)
+
+            #if self.current_seq_number == self.expected_seq_number:
+            if self.current_seq_number - self.last_ACKed == 1:
+                self.simulator.start_timer(self.entity, self.timer_interval)
+            self.current_seq_number += 1
+
+        else:
+            self.app_layer_buffer.append(payload)
 
     # This function implements the RECEIVING functionality. This function will be more complex that
     # receive_from_application_layer(), as it must process both packets containing new data, and packets
@@ -119,7 +161,101 @@ class GBNHost():
     #       not send an ACK when we should have
     # TODO: Implement this method
     def receive_from_network_layer(self, byte_data):
-        pass
+        # All packet info that was recieved
+        seq_num = unpack('!i', byte_data[:4])[0]
+        ack_num = unpack('!i', byte_data[4:8])[0]
+        checksum_val = unpack('!H', byte_data[8:10])[0]
+        is_ACK = unpack('!?', byte_data[10:11])[0]
+        payload_length = unpack('!i', byte_data[11:15])[0]
+        payload = unpack('!%is' % payload_length, byte_data[15:])[0]
+        payload = payload.decode('utf-8')
+
+        # We have data to work with
+        if is_ACK == False:
+            # We want to send a new ACK packet
+            if seq_num == self.expected_seq_number:
+                self.simulator.to_layer5(self.entity, payload)
+
+                ack_pkt = pack('!iiH?i', 0, ack_num, 0x0000, True, 0)
+                checksum = self.compute_checksum(ack_pkt)
+                ack_pkt = pack('!iiH?i', 0, ack_num, checksum, True, 0)
+
+                self.last_ACK_pkt = ack_pkt
+                self.simulator.to_layer3(self.entity, ack_pkt, True)
+                self.expected_seq_number += 1
+            # Send old ACK packet
+            else:
+                self.simulator.to_layer3(self.entity, self.last_ACK_pkt, True)
+
+        elif is_ACK == True:
+            if ack_num > self.last_ACKed:
+                # This line is weird
+                self.last_ACKed += 1
+                # Move base over one slot
+                base = self.last_ACKed + 1
+                # If the base equals the expected sequence number stop the timer
+                if base == self.expected_seq_number:
+                    self.simulator.stop_timer(self.entity)
+                # If the base does not equal the expected number start the timer
+                else:
+                    self.simulator.stop_timer(self.entity)
+                    self.simulator.start_timer(self.entity, self.timer_interval)
+
+
+
+
+
+
+
+
+
+
+
+
+        # # Get the payload info to know if its data or an ack
+        # payload = None
+        # unpacked_data = unpack('!iiH?i', byte_data[:15])
+        # payload_unpacked = unpack('!%is'  % unpacked_data[4], byte_data[15:])
+        # payload = payload_unpacked[0].decode('utf-8')
+       
+    #    # Check the checksum
+    #     test_pkt = pack('!iiH?i%is' % len(payload), unpacked_data[0], unpacked_data[1], unpacked_data[2], unpacked_data[4], unpacked_data[3], b'payload_unpacked')
+    #     temp_checksum = self.compute_checksum(test_pkt)
+    #     print(temp_checksum)
+    #     valid = False
+    #     if not valid:
+    #         pass
+
+
+        # # If its not an ack message
+        # if len(payload) > 0:
+        #     if unpacked_data[0] == self.expected_seq_number:
+        #         # Send the payload back to layer_5
+        #         self.simulator.to_layer5(self.entity, payload)
+        #         # Create an ack package
+        #         pkt = pack('!iiH?i', 0, self.expected_seq_number, 0x0000, True, 0)
+        #         checksum = self.compute_checksum(pkt)
+        #         pkt = pack('!iiH?i', 0, self.expected_seq_number, checksum, True, 0)
+        #         self.last_ACK_pkt = pkt
+        #         self.simulator.to_layer3(self.entity, pkt, True)
+        #         # Increment expected number
+        #         self.expected_seq_number += 1
+        #     else:
+        #         self.simulator.to_layer3(self.entity, self.last_ACK_pkt, True)
+
+        # # If the message recieved is an ack message
+        # else:
+        #     # Move base over one slot
+        #     base = self.last_ACKed + 1
+        #     self.last_ACKed += 1
+        #     # If the base equals the expected sequence number stop the timer
+        #     if base == self.expected_seq_number:
+        #         self.simulator.stop_timer(self.entity)
+        #     # If the base does not equal the expected number start the timer
+        #     else:
+        #         self.simulator.stop_timer(self.entity)
+        #         self.simulator.start_timer(self.entity, self.timer_interval)
+
 
 
     # This function is called by the simulator when a timer interrupt is triggered due to an ACK not being 
